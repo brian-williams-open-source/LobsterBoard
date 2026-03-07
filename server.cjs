@@ -593,19 +593,39 @@ function readCredentials(provider) {
     }
   }
   
-  // Try macOS keychain
+  // Try macOS keychain (may have multiple entries with different accounts)
   if (process.platform === 'darwin' && config.keychainService) {
-    try {
-      const { execSync } = require('child_process');
-      const keychainData = execSync(
-        `security find-generic-password -s "${config.keychainService}" -w 2>/dev/null`,
-        { encoding: 'utf8', timeout: 5000 }
-      ).trim();
-      if (keychainData) {
-        return { source: 'keychain', service: config.keychainService, data: JSON.parse(keychainData) };
+    const { execSync } = require('child_process');
+    const accounts = [process.env.USER, os.userInfo().username, 'Claude Code', ''].filter(Boolean);
+    
+    for (const account of accounts) {
+      try {
+        const accountArg = account ? `-a "${account}"` : '';
+        const keychainData = execSync(
+          `security find-generic-password -s "${config.keychainService}" ${accountArg} -w 2>/dev/null`,
+          { encoding: 'utf8', timeout: 5000 }
+        ).trim();
+        if (keychainData) {
+          const parsed = JSON.parse(keychainData);
+          // Check if this token is valid (not expired)
+          const oauth = parsed.claudeAiOauth || parsed;
+          if (oauth.expiresAt && oauth.expiresAt > Date.now()) {
+            return { source: 'keychain', service: config.keychainService, account, data: parsed };
+          }
+          // If no expiry or expired, keep looking but save as fallback
+          if (!config._fallbackCreds) {
+            config._fallbackCreds = { source: 'keychain', service: config.keychainService, account, data: parsed };
+          }
+        }
+      } catch (e) {
+        // Try next account
       }
-    } catch (e) {
-      // Keychain access failed or not found
+    }
+    // Return fallback if we found expired creds but nothing valid
+    if (config._fallbackCreds) {
+      const result = config._fallbackCreds;
+      delete config._fallbackCreds;
+      return result;
     }
   }
   
