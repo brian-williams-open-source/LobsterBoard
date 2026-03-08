@@ -1548,8 +1548,8 @@ function showProperties(widget) {
     document.getElementById('prop-endpoint').value = widget.properties.endpoint || '';
   }
 
-  // Show server dropdown for system widgets
-  const systemWidgets = ['uptime-monitor', 'docker-containers', 'disk-usage', 'network-speed', 'cpu-memory', 'ai-usage'];
+  // Show server dropdown for system/remote widgets
+  const systemWidgets = ['uptime-monitor', 'docker-containers', 'disk-usage', 'network-speed', 'cpu-memory', 'ai-usage', 'openclaw-release'];
   const serverGroup = document.getElementById('prop-server-group');
   if (serverGroup && systemWidgets.includes(widget.type)) {
     serverGroup.style.display = 'block';

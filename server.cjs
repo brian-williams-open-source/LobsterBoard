@@ -2614,20 +2614,26 @@ const server = http.createServer(async (req, res) => {
       try {
         let currentVersion = 'unknown';
         try {
-          // Use process.execPath to find the node binary's lib directory
-          const nodeDir = path.dirname(path.dirname(process.execPath)); // e.g. /Users/x/.nvm/versions/node/v24.13.0
-          const candidates = [
-            path.join(nodeDir, 'lib/node_modules/openclaw/package.json'),
-            path.join(os.homedir(), '.nvm/versions/node', process.version, 'lib/node_modules/openclaw/package.json'),
-            '/usr/local/lib/node_modules/openclaw/package.json'
-          ];
-          for (const cand of candidates) {
-            try {
-              currentVersion = JSON.parse(fs.readFileSync(cand, 'utf8')).version;
-              break;
-            } catch (_) {}
-          }
-        } catch (_) {}
+          // Run openclaw --version to get the actual running version
+          const { execSync } = require('child_process');
+          currentVersion = execSync('openclaw --version 2>/dev/null', { encoding: 'utf8', timeout: 5000 }).trim();
+        } catch (_) {
+          // Fallback: try reading from package.json
+          try {
+            const nodeDir = path.dirname(path.dirname(process.execPath));
+            const candidates = [
+              path.join(nodeDir, 'lib/node_modules/openclaw/package.json'),
+              path.join(os.homedir(), '.nvm/versions/node', process.version, 'lib/node_modules/openclaw/package.json'),
+              '/usr/local/lib/node_modules/openclaw/package.json'
+            ];
+            for (const cand of candidates) {
+              try {
+                currentVersion = JSON.parse(fs.readFileSync(cand, 'utf8')).version;
+                break;
+              } catch (_) {}
+            }
+          } catch (_) {}
+        }
 
         const ghRes = await fetch('https://api.github.com/repos/openclaw/openclaw/releases/latest');
         const ghData = await ghRes.json();

@@ -632,6 +632,7 @@ const WIDGETS = {
     hasApiKey: false,
     properties: {
       title: 'OpenClaw',
+      server: 'local',
       openclawUrl: '',
       refreshInterval: 3600
     },
@@ -658,21 +659,38 @@ const WIDGETS = {
       </div>`,
     generateJs: (props) => `
       async function update_${props.id.replace(/-/g, '_')}() {
+        const serverId = '${props.server || 'local'}';
         const currentEl = document.getElementById('${props.id}-current');
         const arrowEl = document.getElementById('${props.id}-arrow');
         const latestEl = document.getElementById('${props.id}-latest');
         const statusEl = document.getElementById('${props.id}-status');
         
         try {
-          const res = await fetch('/api/releases');
-          const data = await res.json();
-          if (data.status !== 'ok') throw new Error(data.message);
+          let cur, lat;
           
-          const cur = (data.current || '').replace(/^v/, '');
-          const lat = (data.latest || '').replace(/^v/, '');
+          if (serverId === 'local') {
+            // Local: fetch from /api/releases
+            const res = await fetch('/api/releases');
+            const data = await res.json();
+            if (data.status !== 'ok') throw new Error(data.message);
+            cur = (data.current || '').replace(/^v/, '');
+            lat = (data.latest || '').replace(/^v/, '');
+          } else {
+            // Remote: fetch from server stats and get openclaw.version
+            const res = await fetch('/api/servers/' + serverId + '/stats');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            if (!data.openclaw) throw new Error('OpenClaw not installed on remote');
+            cur = (data.openclaw.version || '').replace(/^v/, '');
+            // Fetch latest from GitHub
+            const ghRes = await fetch('https://api.github.com/repos/openclaw/openclaw/releases/latest');
+            const ghData = await ghRes.json();
+            lat = (ghData.tag_name || '').replace(/^v/, '');
+          }
+          
           // Strip -N suffixes for comparison (e.g. 2026.2.22-2 matches 2026.2.22)
-          const curBase = cur.replace(/-\d+$/, '');
-          const latBase = lat.replace(/-\d+$/, '');
+          const curBase = cur.replace(/-\\d+$/, '');
+          const latBase = lat.replace(/-\\d+$/, '');
           const isUpToDate = cur === lat || curBase === latBase || cur.startsWith(latBase + '-');
           
           if (!cur || cur === 'unknown') {
@@ -695,7 +713,7 @@ const WIDGETS = {
           }
         } catch (e) {
           currentEl.textContent = '—';
-          statusEl.textContent = 'Error';
+          statusEl.textContent = e.message || 'Error';
           console.error('OpenClaw Release widget error:', e);
         }
       }
