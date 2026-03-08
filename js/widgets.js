@@ -161,6 +161,82 @@ function onSystemStats(callback) {
   }
 }
 
+// ─────────────────────────────────────────────
+// Remote server polling for system stats
+// ─────────────────────────────────────────────
+const _remotePollers = {}; // serverId -> { interval, callbacks }
+
+function onRemoteStats(serverId, callback, refreshMs = 10000) {
+  if (!_remotePollers[serverId]) {
+    _remotePollers[serverId] = { callbacks: [], interval: null, lastData: null };
+    
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/servers/${serverId}/stats`);
+        if (res.ok) {
+          const data = await res.json();
+          // Normalize remote data to match local SSE format
+          const normalized = _normalizeRemoteStats(data);
+          _remotePollers[serverId].lastData = normalized;
+          _remotePollers[serverId].callbacks.forEach(cb => cb(normalized));
+        }
+      } catch (e) {
+        console.warn(`Remote stats error (${serverId}):`, e.message);
+      }
+    };
+    
+    poll(); // Initial fetch
+    _remotePollers[serverId].interval = setInterval(poll, refreshMs);
+  }
+  
+  _remotePollers[serverId].callbacks.push(callback);
+  
+  // If we have cached data, call immediately
+  if (_remotePollers[serverId].lastData) {
+    callback(_remotePollers[serverId].lastData);
+  }
+}
+
+// Normalize remote agent stats to match local SSE format
+function _normalizeRemoteStats(data) {
+  return {
+    uptime: data.uptime,
+    cpu: data.cpu ? {
+      currentLoad: data.cpu.usage || 0,
+      cores: data.cpu.cores || 0,
+    } : null,
+    memory: data.memory ? {
+      total: data.memory.total || 0,
+      active: data.memory.used || 0,
+      available: data.memory.available || 0,
+    } : null,
+    disk: data.disk ? [{
+      mount: data.disk.mount || '/',
+      size: data.disk.total || 0,
+      used: data.disk.used || 0,
+    }] : null,
+    network: data.network ? [{
+      rx_sec: data.network.rxSec || 0,
+      tx_sec: data.network.txSec || 0,
+    }] : null,
+    docker: data.docker,
+    openclaw: data.openclaw,
+    serverName: data.serverName,
+    _remote: true,
+  };
+}
+
+// Unified stats function: local or remote
+function onStats(serverId, callback, refreshMs = 10000) {
+  if (!serverId || serverId === 'local') {
+    onSystemStats(callback);
+  } else {
+    onRemoteStats(serverId, callback, refreshMs);
+  }
+}
+
+window.onStats = onStats;
+
 function _formatBytes(bytes, decimals = 1) {
   if (bytes === 0 || bytes == null) return '0 B';
   const k = 1024;
@@ -2148,14 +2224,14 @@ const WIDGETS = {
     name: 'Disk Usage',
     icon: '💾',
     category: 'small',
-    description: 'Shows disk space usage. Requires system stats API.',
+    description: 'Shows disk space usage. Supports remote servers via lobsterboard-agent.',
     defaultWidth: 160,
     defaultHeight: 100,
     hasApiKey: false,
     properties: {
       title: 'Disk',
+      server: 'local',
       path: '/',
-      endpoint: '/api/disk',
       refreshInterval: 60
     },
     preview: `<div style="text-align:center;padding:8px;">
@@ -2183,20 +2259,27 @@ const WIDGETS = {
         </div>
       </div>`,
     generateJs: (props) => `
-      // Disk Usage Widget: ${props.id} — live via SSE
-      onSystemStats(function(data) {
-        if (!data.disk || data.disk.length === 0) return;
-        // Find the configured mount or default to first/root
-        const targetMount = '${props.path || '/'}';
-        const d = data.disk.find(x => x.mount === targetMount) || data.disk[0];
-        const pct = d.use || 0;
+      // Disk Usage Widget: ${props.id} — ${props.server === 'local' ? 'local SSE' : 'remote: ' + props.server}
+      onStats('${props.server || 'local'}', function(data) {
+        // Handle both local (array) and remote (object) disk data
+        let d;
+        if (Array.isArray(data.disk)) {
+          if (data.disk.length === 0) return;
+          const targetMount = '${props.path || '/'}';
+          d = data.disk.find(x => x.mount === targetMount) || data.disk[0];
+        } else if (data.disk) {
+          d = data.disk;
+        } else {
+          return;
+        }
+        const pct = d.use || d.percent || 0;
         const circumference = 125.66;
         document.getElementById('${props.id}-ring').style.strokeDashoffset = circumference - (pct / 100) * circumference;
         document.getElementById('${props.id}-pct').textContent = Math.round(pct) + '%';
-        const usedGB = (d.used / (1024*1024*1024)).toFixed(1);
-        const totalGB = (d.size / (1024*1024*1024)).toFixed(0);
+        const usedGB = ((d.used || 0) / (1024*1024*1024)).toFixed(1);
+        const totalGB = ((d.size || d.total || 0) / (1024*1024*1024)).toFixed(0);
         document.getElementById('${props.id}-size').textContent = usedGB + ' / ' + totalGB + ' GB';
-      });
+      }, ${(props.refreshInterval || 60) * 1000});
     `
   },
 
@@ -2204,32 +2287,33 @@ const WIDGETS = {
     name: 'Uptime Monitor',
     icon: '📡',
     category: 'large',
-    description: 'Shows service uptime. Requires uptime monitoring backend.',
+    description: 'Shows system uptime, CPU, and memory. Supports remote servers via lobsterboard-agent.',
     defaultWidth: 350,
     defaultHeight: 220,
     hasApiKey: false,
     properties: {
       title: 'Uptime',
-      services: 'Website,API,Database',
+      server: 'local',
       refreshInterval: 30
     },
     preview: `<div style="padding:4px;font-size:11px;">
-      <div>🟢 Website — 99.9%</div>
-      <div>🟢 API — 100%</div>
-      <div>🟡 Database — 98.2%</div>
+      <div>🟢 System — 5d 12h</div>
+      <div>🟢 CPU — 12.5%</div>
+      <div>🟢 Memory — 45.2%</div>
     </div>`,
     generateHtml: (props) => `
       <div class="dash-card" id="widget-${props.id}" style="height:100%;">
         <div class="dash-card-head">
           <span class="dash-card-title">${renderIcon('uptime')} ${props.title || 'Uptime'}</span>
+          ${props.server && props.server !== 'local' ? `<span class="dash-card-badge" style="font-size:10px;">🌐</span>` : ''}
         </div>
         <div class="dash-card-body" id="${props.id}-services">
           <div class="uptime-row" style="color:var(--text-muted);justify-content:center;">Loading...</div>
         </div>
       </div>`,
     generateJs: (props) => `
-      // Uptime Monitor Widget: ${props.id} — live via SSE
-      onSystemStats(function(data) {
+      // Uptime Monitor Widget: ${props.id} — ${props.server === 'local' ? 'local SSE' : 'remote: ' + props.server}
+      onStats('${props.server || 'local'}', function(data) {
         if (data.uptime == null) return;
         const container = document.getElementById('${props.id}-services');
         const secs = data.uptime;
@@ -2248,8 +2332,11 @@ const WIDGETS = {
           const memPct = ((data.memory.active / data.memory.total) * 100).toFixed(1);
           html += '<div class="uptime-row"><span>' + window.renderIcon('memory') + ' Memory</span><span class="uptime-pct">' + memPct + '%</span></div>';
         }
+        if (data.serverName && data._remote) {
+          html += '<div class="uptime-row" style="opacity:0.6;font-size:11px;"><span>📡 ' + data.serverName + '</span></div>';
+        }
         container.innerHTML = html;
-      });
+      }, ${(props.refreshInterval || 30) * 1000});
     `
   },
 
@@ -2257,13 +2344,13 @@ const WIDGETS = {
     name: 'Docker Containers',
     icon: '🐳',
     category: 'large',
-    description: 'Lists Docker containers with status. Requires Docker API proxy.',
+    description: 'Lists Docker containers with status. Supports remote servers via lobsterboard-agent.',
     defaultWidth: 380,
     defaultHeight: 250,
     hasApiKey: false,
     properties: {
       title: 'Containers',
-      endpoint: '/api/docker',
+      server: 'local',
       refreshInterval: 10
     },
     preview: `<div style="padding:4px;font-size:11px;">
@@ -2282,23 +2369,27 @@ const WIDGETS = {
         </div>
       </div>`,
     generateJs: (props) => `
-      // Docker Containers Widget: ${props.id} — live via SSE
-      onSystemStats(function(data) {
+      // Docker Containers Widget: ${props.id} — ${props.server === 'local' ? 'local SSE' : 'remote: ' + props.server}
+      onStats('${props.server || 'local'}', function(data) {
         const list = document.getElementById('${props.id}-list');
         const badge = document.getElementById('${props.id}-badge');
-        if (!data.docker || data.docker.length === 0) {
-          list.innerHTML = '<div class="docker-row" style="color:var(--text-muted);">No containers found</div>';
-          badge.textContent = '0';
+        // Handle remote docker data structure
+        const dockerData = data._remote && data.docker?.containers ? data.docker.containers : data.docker;
+        if (!dockerData || dockerData.length === 0) {
+          const msg = data._remote && data.docker?.available === false ? 'Docker not available' : 'No containers found';
+          list.innerHTML = '<div class="docker-row" style="color:var(--text-muted);">' + msg + '</div>';
+          badge.textContent = data._remote && data.docker ? (data.docker.running || 0) + '/' + (data.docker.total || 0) : '0';
           return;
         }
-        const containers = data.docker;
+        const containers = dockerData;
         list.innerHTML = containers.map(function(c) {
-          const icon = c.state === 'running' ? '🟢' : '🔴';
+          const running = c.state === 'running' || c.running === true;
+          const icon = running ? '🟢' : '🔴';
           const name = (c.name || '').replace(/^\\//, '');
           return '<div class="docker-row">' + icon + ' ' + name + '<span class="docker-status">' + (c.state || c.status || '—') + '</span></div>';
         }).join('');
-        badge.textContent = containers.length;
-      });
+        badge.textContent = data._remote && data.docker ? (data.docker.running || 0) + '/' + (data.docker.total || 0) : containers.length;
+      }, ${(props.refreshInterval || 10) * 1000});
     `
   },
 
@@ -2306,18 +2397,18 @@ const WIDGETS = {
     name: 'Network Speed',
     icon: '🌐',
     category: 'small',
-    description: 'Shows real-time network activity (upload/download throughput). Updates every 2 seconds.',
+    description: 'Shows real-time network activity. Supports remote servers via lobsterboard-agent.',
     defaultWidth: 200,
     defaultHeight: 100,
     hasApiKey: false,
     properties: {
       title: 'Network',
-      endpoint: '/api/network',
-      refreshInterval: 2
+      server: 'local',
+      refreshInterval: 5
     },
     preview: `<div style="padding:8px;font-size:11px;">
-      <div>↓ <span style="color:#3fb950;">45 Mbps</span></div>
-      <div>↑ <span style="color:#58a6ff;">12 Mbps</span></div>
+      <div>↓ <span style="color:#3fb950;">45 KB/s</span></div>
+      <div>↑ <span style="color:#58a6ff;">12 KB/s</span></div>
     </div>`,
     generateHtml: (props) => `
       <div class="dash-card" id="widget-${props.id}" style="height:100%;">
@@ -2330,26 +2421,31 @@ const WIDGETS = {
         </div>
       </div>`,
     generateJs: (props) => `
-      // Network Speed Widget: ${props.id} — live via SSE
+      // Network Speed Widget: ${props.id} — ${props.server === 'local' ? 'local SSE' : 'remote: ' + props.server}
       function _fmtRate(bytes) {
         if (bytes == null || bytes < 0) return '0 B/s';
         if (bytes < 1024) return bytes.toFixed(0) + ' B/s';
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB/s';
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB/s';
       }
-      onSystemStats(function(data) {
+      onStats('${props.server || 'local'}', function(data) {
         if (!data.network || data.network.length === 0) return;
-        // Sum all interfaces or pick the first non-loopback
+        // Handle both local (array) and remote (object) formats
         let rx = 0, tx = 0;
-        data.network.forEach(function(n) {
-          if (n.iface !== 'lo' && n.iface !== 'lo0') {
-            rx += (n.rx_sec || 0);
-            tx += (n.tx_sec || 0);
-          }
-        });
+        if (Array.isArray(data.network)) {
+          data.network.forEach(function(n) {
+            if (n.iface !== 'lo' && n.iface !== 'lo0') {
+              rx += (n.rx_sec || 0);
+              tx += (n.tx_sec || 0);
+            }
+          });
+        } else {
+          rx = data.network.rx_sec || data.network.rxSec || 0;
+          tx = data.network.tx_sec || data.network.txSec || 0;
+        }
         document.getElementById('${props.id}-down').textContent = _fmtRate(rx);
         document.getElementById('${props.id}-up').textContent = _fmtRate(tx);
-      });
+      }, ${(props.refreshInterval || 5) * 1000});
     `
   },
 
