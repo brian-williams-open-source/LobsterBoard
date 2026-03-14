@@ -59,68 +59,95 @@ const HOST = process.env.HOST || '127.0.0.1';
 // ─────────────────────────────────────────────
 // Pages System — auto-discovery and mounting
 // ─────────────────────────────────────────────
-const PAGES_DIR = path.join(__dirname, 'pages');
-const PAGES_JSON = path.join(__dirname, 'pages.json');
-const DATA_DIR = path.join(__dirname, 'data');
+// Load from both package pages AND user's working directory pages (user overrides package)
+const CWD = process.cwd();
+const USER_PAGES_DIR = path.join(CWD, 'pages');
+const PKG_PAGES_DIR = path.join(__dirname, 'pages');
+const PAGES_DIRS = [PKG_PAGES_DIR]; // Package pages first
+if (CWD !== __dirname && fs.existsSync(USER_PAGES_DIR)) {
+  PAGES_DIRS.push(USER_PAGES_DIR); // User pages override
+}
+// For backwards compat, PAGES_DIR points to first available (used for _shared)
+const PAGES_DIR = fs.existsSync(USER_PAGES_DIR) ? USER_PAGES_DIR : PKG_PAGES_DIR;
+const USER_PAGES_JSON = path.join(CWD, 'pages.json');
+const PKG_PAGES_JSON = path.join(__dirname, 'pages.json');
+const PAGES_JSON = fs.existsSync(USER_PAGES_JSON) ? USER_PAGES_JSON : PKG_PAGES_JSON;
+// Data always in working directory (user's data)
+const DATA_DIR = path.join(CWD, 'data');
 
 let loadedPages = []; // { id, title, icon, description, order, routes: { 'METHOD /path': handler } }
 
 function loadPages() {
   const pages = [];
+  const seenIds = new Set();
   let overrides = { pages: {} };
   try { overrides = JSON.parse(fs.readFileSync(PAGES_JSON, 'utf8')); } catch (_) {}
 
-  let dirs;
-  try { dirs = fs.readdirSync(PAGES_DIR); } catch (_) { return pages; }
+  // Scan all page directories (user pages loaded last to override package pages)
+  for (const pagesDir of PAGES_DIRS) {
+    let dirs;
+    try { dirs = fs.readdirSync(pagesDir); } catch (_) { continue; }
 
-  for (const dir of dirs) {
-    if (dir.startsWith('_')) continue;
-    const metaPath = path.join(PAGES_DIR, dir, 'page.json');
-    if (!fs.existsSync(metaPath)) continue;
+    for (const dir of dirs) {
+      if (dir.startsWith('_')) continue;
+      const metaPath = path.join(pagesDir, dir, 'page.json');
+      if (!fs.existsSync(metaPath)) continue;
 
-    let meta;
-    try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (_) { continue; }
+      let meta;
+      try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (_) { continue; }
 
-    const override = overrides.pages[meta.id] || {};
-    meta.enabled = override.enabled ?? meta.enabled ?? true;
-    meta.order = override.order ?? meta.order ?? 99;
+      const override = overrides.pages[meta.id] || {};
+      meta.enabled = override.enabled ?? meta.enabled ?? true;
+      meta.order = override.order ?? meta.order ?? 99;
 
-    if (!meta.enabled) continue;
+      if (!meta.enabled) continue;
 
-    // Ensure data dir
-    const dataDir = path.join(DATA_DIR, meta.id);
-    fs.mkdirSync(dataDir, { recursive: true });
-
-    // Load API routes if api.cjs (or api.js) exists
-    let apiPath = path.join(PAGES_DIR, dir, 'api.cjs');
-    if (!fs.existsSync(apiPath)) apiPath = path.join(PAGES_DIR, dir, 'api.js');
-    let routes = {};
-    if (fs.existsSync(apiPath)) {
-      try {
-        const ctx = {
-          dataDir,
-          readData: (filename) => JSON.parse(fs.readFileSync(path.join(dataDir, filename), 'utf8')),
-          writeData: (filename, obj) => {
-            fs.mkdirSync(dataDir, { recursive: true });
-            fs.writeFileSync(path.join(dataDir, filename), JSON.stringify(obj, null, 2));
-          }
-        };
-        const pageModule = require(apiPath)(ctx);
-        routes = pageModule.routes || {};
-      } catch (e) {
-        console.error(`Error loading page API for ${meta.id}:`, e.message);
+      // If we've seen this ID before (from package), remove it so user page wins
+      if (seenIds.has(meta.id)) {
+        const idx = pages.findIndex(p => p.id === meta.id);
+        if (idx !== -1) pages.splice(idx, 1);
       }
-    }
+      seenIds.add(meta.id);
 
-    pages.push({
-      id: meta.id,
-      title: meta.title,
-      icon: meta.icon,
-      description: meta.description,
-      order: meta.order,
-      nav: meta.nav !== false,
-      routes
-    });
+      // Store which directory this page came from
+      meta._pagesDir = pagesDir;
+
+      // Ensure data dir
+      const dataDir = path.join(DATA_DIR, meta.id);
+      fs.mkdirSync(dataDir, { recursive: true });
+
+      // Load API routes if api.cjs (or api.js) exists
+      let apiPath = path.join(pagesDir, dir, 'api.cjs');
+      if (!fs.existsSync(apiPath)) apiPath = path.join(pagesDir, dir, 'api.js');
+      let routes = {};
+      if (fs.existsSync(apiPath)) {
+        try {
+          const ctx = {
+            dataDir,
+            readData: (filename) => JSON.parse(fs.readFileSync(path.join(dataDir, filename), 'utf8')),
+            writeData: (filename, obj) => {
+              fs.mkdirSync(dataDir, { recursive: true });
+              fs.writeFileSync(path.join(dataDir, filename), JSON.stringify(obj, null, 2));
+            }
+          };
+          const pageModule = require(apiPath)(ctx);
+          routes = pageModule.routes || {};
+        } catch (e) {
+          console.error(`Error loading page API for ${meta.id}:`, e.message);
+        }
+      }
+
+      pages.push({
+        id: meta.id,
+        title: meta.title,
+        icon: meta.icon,
+        description: meta.description,
+        order: meta.order,
+        nav: meta.nav !== false,
+        _pagesDir: pagesDir,
+        routes
+      });
+    }
   }
 
   return pages.sort((a, b) => a.order - b.order);
@@ -173,11 +200,16 @@ function matchPageRoute(pages, method, pathname, parsedUrl) {
     }
     const page = pages.find(p => p.id === pageId);
     if (page) {
-      const subPath = pagesMatch[2] || '/';
-      if (subPath === '/' || subPath === '') {
-        return { type: 'static', filePath: path.join(PAGES_DIR, pageId, 'index.html') };
+      const subPath = pagesMatch[2] || '';
+      // Redirect /pages/id to /pages/id/ (trailing slash) for proper relative path resolution
+      if (!subPath) {
+        return { type: 'redirect', location: `/pages/${pageId}/` };
       }
-      return { type: 'static', filePath: path.join(PAGES_DIR, pageId, subPath.slice(1)) };
+      const pageDir = page._pagesDir || PAGES_DIR;
+      if (subPath === '/') {
+        return { type: 'static', filePath: path.join(pageDir, pageId, 'index.html') };
+      }
+      return { type: 'static', filePath: path.join(pageDir, pageId, subPath.slice(1)) };
     }
   }
 
@@ -2329,9 +2361,16 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, loadedPages.filter(p => p.nav !== false).map(p => ({ id: p.id, title: p.title, icon: p.icon, description: p.description, order: p.order })));
       return;
     }
+    if (pageMatch.type === 'redirect') {
+      res.writeHead(302, { Location: pageMatch.location });
+      res.end();
+      return;
+    }
     if (pageMatch.type === 'static') {
       const resolved = path.resolve(pageMatch.filePath);
-      if (!resolved.startsWith(path.resolve(PAGES_DIR))) {
+      // Security: ensure path is within one of the allowed page directories
+      const isAllowed = PAGES_DIRS.some(dir => resolved.startsWith(path.resolve(dir)));
+      if (!isAllowed) {
         sendResponse(res, 403, 'text/plain', 'Forbidden');
         return;
       }
@@ -3370,6 +3409,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Serve static files
+  // Check working directory's public/ folder first (for user assets like recap images)
+  const publicPath = path.join(CWD, 'public', pathname);
+  const publicResolved = path.resolve(publicPath);
+  if (publicResolved.startsWith(path.join(CWD, 'public') + path.sep) && fs.existsSync(publicPath)) {
+    const ext = path.extname(publicPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    fs.readFile(publicPath, (err, data) => {
+      if (err) { sendError(res, err.message); return; }
+      sendResponse(res, 200, contentType, data);
+    });
+    return;
+  }
+
   let filePath = path.join(__dirname, pathname);
   if (pathname === '/') {
     filePath = path.join(__dirname, 'app.html');
