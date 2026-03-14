@@ -368,9 +368,50 @@ const MIME_TYPES = {
   '.map': 'application/json' // For sourcemaps
 };
 
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const AUTH_FILE = path.join(__dirname, 'auth.json');
-const SECRETS_FILE = path.join(__dirname, 'secrets.json');
+// User config files — stored in working directory (survives npm updates)
+const CONFIG_FILE = path.join(CWD, 'config.json');
+const AUTH_FILE = path.join(CWD, 'auth.json');
+const SECRETS_FILE = path.join(CWD, 'secrets.json');
+
+// ─────────────────────────────────────────────
+// Migration: copy data from package dir to user dir (v0.6.2+)
+// ─────────────────────────────────────────────
+function migrateUserData() {
+  const filesToMigrate = ['config.json', 'auth.json', 'secrets.json', 'todos.json', 'notes.json'];
+  const dirsToMigrate = ['data'];
+  let migrated = [];
+
+  for (const file of filesToMigrate) {
+    const userPath = path.join(CWD, file);
+    const pkgPath = path.join(PKG_DIR, file);
+    if (!fs.existsSync(userPath) && fs.existsSync(pkgPath)) {
+      try {
+        fs.copyFileSync(pkgPath, userPath);
+        migrated.push(file);
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  for (const dir of dirsToMigrate) {
+    const userDir = path.join(CWD, dir);
+    const pkgDir = path.join(PKG_DIR, dir);
+    if (!fs.existsSync(userDir) && fs.existsSync(pkgDir)) {
+      try {
+        fs.cpSync(pkgDir, userDir, { recursive: true });
+        migrated.push(dir + '/');
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  if (migrated.length > 0) {
+    console.log(`📦 Migrated data to working directory: ${migrated.join(', ')}`);
+  }
+}
+
+// Run migration on startup
+if (CWD !== PKG_DIR) {
+  migrateUserData();
+}
 
 // ─────────────────────────────────────────────
 // Server-side Session Authentication
@@ -1701,7 +1742,7 @@ const aiUsageCache = {
 const AI_CACHE_TTL_MS = 300000; // 5 minutes cache
 
 // Persistent file cache (survives restarts)
-const AI_CACHE_FILE = path.join(__dirname, 'data', 'ai-usage-cache.json');
+const AI_CACHE_FILE = path.join(CWD, 'data', 'ai-usage-cache.json');
 
 function loadPersistentCache() {
   try {
@@ -1894,7 +1935,7 @@ const server = http.createServer(async (req, res) => {
   // ─────────────────────────────────────────────
   // Server Profiles API (for remote LobsterBoard Agent connections)
   // ─────────────────────────────────────────────
-  const SERVERS_FILE = path.join(__dirname, 'data', 'servers.json');
+  const SERVERS_FILE = path.join(CWD, 'data', 'servers.json');
   
   function loadServers() {
     try {
@@ -2413,7 +2454,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET/POST /api/todos - Read/write todo list
   if (pathname === '/api/todos') {
-    const todosFile = path.join(__dirname, 'todos.json');
+    const todosFile = path.join(CWD, 'todos.json');
     if (req.method === 'GET') {
       fs.readFile(todosFile, 'utf8', (err, data) => {
         if (err) {
@@ -2449,7 +2490,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET/POST /api/notes - Read/write notes content
   if (pathname === '/api/notes') {
-    const notesFile = path.join(__dirname, 'notes.json');
+    const notesFile = path.join(CWD, 'notes.json');
     if (req.method === 'GET') {
       fs.readFile(notesFile, 'utf8', (err, data) => {
         if (err) {
