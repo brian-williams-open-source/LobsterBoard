@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.0] - 2026-03-17
+
+### Added
+- **Enhanced Gemini CLI integration** — auto-detect all available Gemini CLI quota buckets (including new 3.x models) instead of hardcoded 2.x allowlist — thanks @mastash3ff!
+- **Auto-refresh OAuth tokens** — Gemini CLI tokens now automatically refresh to survive multi-machine rotation, preventing authentication failures — thanks @mastash3ff!
+
+### Changed
+- **Future-proof model support** — Gemini CLI collector now automatically surfaces new quota windows when Google adds them
+
 ## [0.3.1] - 2026-02-28
 
 ### Fixed
